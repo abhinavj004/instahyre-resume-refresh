@@ -232,6 +232,33 @@ def logout(session):
             f"Logout failed: {e}"
         )
 
+def send_telegram(message):
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not token or not chat_id:
+        logger.warning(
+            "Telegram not configured. Skipping notification."
+        )
+        return
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": message
+            },
+            timeout=20
+        )
+
+        response.raise_for_status()
+
+    except Exception as e:
+        logger.warning(
+            f"Telegram notification failed: {e}"
+        )
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -268,7 +295,7 @@ def main():
             f"{old_uploaded_on}"
         )
 
-        refresh_resume(session, profile)
+        result = refresh_resume(session, profile)
 
         updated_profile = get_profile(session)
 
@@ -289,6 +316,10 @@ def main():
 
         logger.info(
             "Resume refresh verified successfully"
+        )
+        send_telegram(
+            f"✅ Instahyre refresh successful\n\n"
+            f"Resume Timestamp:\n{new_uploaded_on}"
         )
 
     finally:
@@ -312,5 +343,13 @@ if __name__ == "__main__":
         logger.exception(
             f"Job failed: {e}"
         )
+
+        try:
+            send_telegram(
+                f"❌ Instahyre refresh failed\n\n"
+                f"Reason:\n{str(e)}"
+            )
+        except Exception:
+            pass
 
         sys.exit(1)
