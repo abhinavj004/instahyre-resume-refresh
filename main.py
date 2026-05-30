@@ -299,7 +299,10 @@ def main():
         if updates:
             new_profile_update_ts = updates[0].get("last_modified_at")
 
-        logger.info(f"Profile update timestamp: " f"{new_profile_update_ts}")
+        if old_profile_update_ts == new_profile_update_ts:
+            logger.warning("JSP refresh did not change profile timestamp")
+        else:
+            logger.info("JSP refresh verified successfully")
 
         if old_uploaded_on == new_uploaded_on:
             raise Exception("Resume upload succeeded " "but timestamp did not change")
@@ -330,9 +333,9 @@ if __name__ == "__main__":
 
         logger.exception(f"Job failed: {e}")
 
-    try:
-        send_telegram(f"❌ Instahyre refresh failed\n\n" f"Reason:\n{str(e)}")
-    except Exception:
-        pass
+        try:
+            send_telegram(f"❌ Instahyre refresh failed\n\n" f"Reason:\n{str(e)}")
+        except Exception:
+            pass
 
-    sys.exit(1)
+        sys.exit(1)
