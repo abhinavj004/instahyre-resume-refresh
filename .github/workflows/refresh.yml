@@ -26,4 +26,6 @@ jobs:
         env:
           INSTAHYRE_EMAIL: ${{ secrets.INSTAHYRE_EMAIL }}
           INSTAHYRE_PASSWORD: ${{ secrets.INSTAHYRE_PASSWORD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python main.py
