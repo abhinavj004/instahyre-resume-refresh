@@ -2,7 +2,6 @@ name: Refresh Instahyre Resume
 
 on:
   workflow_dispatch:
-
   schedule:
     - cron: '*/2 * * * *'
 
