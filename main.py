@@ -4,6 +4,7 @@ import random
 import sys
 import time
 from datetime import datetime
+from http.cookies import SimpleCookie
 
 from dotenv import load_dotenv
 from helper import get_resume_payload
@@ -34,7 +35,7 @@ INSTAHYRE_LOGOUT_URL = "https://www.instahyre.com/logout/"
 # CONFIG - NAUKRI
 # ============================================================
 
-NAUKRI_AUTH_TOKEN = os.getenv("NAUKRI_AUTH_TOKEN")
+NAUKRI_COOKIES = os.getenv("NAUKRI_COOKIES")
 NAUKRI_PROXY_URL = os.getenv("NAUKRI_PROXY_URL")
 
 NAUKRI_PROFILE_GET_URL = "https://www.naukri.com/cloudgateway-aurus/aurus-jobseeker-profile-wrapper/v0/jobseeker/users/self/get/fullprofiles"
@@ -263,13 +264,13 @@ def run_instahyre() -> dict:
 
 
 # ============================================================
-# NAUKRI ENGINE (DIRECT TOKEN AUTH)
+# NAUKRI ENGINE (FULL SESSION COOKIES)
 # ============================================================
 
 
 def run_naukri() -> dict:
-    if not NAUKRI_AUTH_TOKEN:
-        raise Exception("NAUKRI_AUTH_TOKEN environment variable not set")
+    if not NAUKRI_COOKIES:
+        raise Exception("NAUKRI_COOKIES environment variable not set")
 
     session = requests.Session()
 
@@ -277,10 +278,16 @@ def run_naukri() -> dict:
         logger.info("[Naukri] Using configured proxy for request routing")
         session.proxies = {"http": NAUKRI_PROXY_URL, "https": NAUKRI_PROXY_URL}
 
-    token = NAUKRI_AUTH_TOKEN.strip()
+    # Parse and set all session cookies
+    cookie_parser = SimpleCookie()
+    cookie_parser.load(NAUKRI_COOKIES)
+    nauk_at_token = None
 
-    # Set authentication cookie and Bearer header
-    session.cookies.set("nauk_at", token, domain=".naukri.com")
+    for key, morsel in cookie_parser.items():
+        session.cookies.set(key, morsel.value, domain=".naukri.com")
+        if key == "nauk_at":
+            nauk_at_token = morsel.value
+
     session.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -293,8 +300,10 @@ def run_naukri() -> dict:
         "Content-Type": "application/json",
         "Origin": "https://www.naukri.com",
         "Referer": "https://www.naukri.com/mnjuser/profile?id=&altresid",
-        "Authorization": f"Bearer {token}",
     })
+
+    if nauk_at_token:
+        session.headers.update({"Authorization": f"Bearer {nauk_at_token}"})
 
     # 1. Fetch current profile state
     logger.info("[Naukri] Fetching current profile details...")
