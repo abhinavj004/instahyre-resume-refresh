@@ -38,9 +38,9 @@ NAUKRI_USERNAME = os.getenv("NAUKRI_USERNAME")
 NAUKRI_PASSWORD = os.getenv("NAUKRI_PASSWORD")
 NAUKRI_PROXY_URL = os.getenv("NAUKRI_PROXY_URL")
 
-# Accurate Central Microservice Gateways
 NAUKRI_LOGIN_URL = "https://www.naukri.com/central-login-services/v1/login"
-NAUKRI_HEADLINE_URL = "https://www.naukri.com/gateway/v1/profile/resume-headline"
+NAUKRI_PROFILE_GET_URL = "https://www.naukri.com/cloudgateway-aurus/aurus-jobseeker-profile-wrapper/v0/jobseeker/users/self/get/fullprofiles"
+NAUKRI_PROFILE_UPDATE_URL = "https://www.naukri.com/cloudgateway-aurus/aurus-jobseeker-profile-wrapper/v0/jobseeker/users/self/update/fullprofiles"
 
 # ============================================================
 # CONFIG - TELEGRAM
@@ -60,34 +60,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# JITTER / SCHEDULE RANDOMIZATION
-# ============================================================
-
-
-def apply_jitter(min_seconds: int = 60, max_seconds: int = 900) -> int:
-    """Applies a random delay in CI/GitHub Actions.
-
-    Can be bypassed by setting SKIP_JITTER=true.
-    """
-    is_ci = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
-    skip = os.getenv("SKIP_JITTER", "false").lower() == "true"
-
-    if not is_ci or skip:
-        logger.info(
-            "Jitter bypass active / Local environment: Skipping schedule jitter."
-        )
-        return 0
-
-    delay = random.randint(min_seconds, max_seconds)
-    mins, secs = divmod(delay, 60)
-    logger.info(
-        f"CI trigger detected. Applying random jitter: waiting for {mins}m {secs}s..."
-    )
-    time.sleep(delay)
-    return delay
-
-
-# ============================================================
 # TELEGRAM NOTIFIER
 # ============================================================
 
@@ -100,12 +72,36 @@ def send_telegram(message: str) -> None:
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": "Markdown",
+            },
             timeout=20,
         )
         response.raise_for_status()
     except Exception as e:
         logger.warning(f"Telegram notification failed: {e}")
+
+
+# ============================================================
+# JITTER / SCHEDULE RANDOMIZATION
+# ============================================================
+
+
+def apply_jitter(min_seconds: int = 60, max_seconds: int = 900) -> int:
+    is_ci = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
+    skip = os.getenv("SKIP_JITTER", "false").lower() == "true"
+
+    if not is_ci or skip:
+        logger.info("Jitter bypass active: Running immediately.")
+        return 0
+
+    delay = random.randint(min_seconds, max_seconds)
+    mins, secs = divmod(delay, 60)
+    logger.info(f"Applying random jitter: waiting for {mins}m {secs}s...")
+    time.sleep(delay)
+    return delay
 
 
 # ============================================================
@@ -145,30 +141,21 @@ def login_instahyre(session: requests.Session) -> None:
     )
     response.raise_for_status()
 
-    session_id = session.cookies.get("sessionid")
-    if not session_id:
-        raise Exception("Instahyre login failed: sessionid cookie not found")
+    if not session.cookies.get("sessionid"):
+        raise Exception("Instahyre login failed: sessionid cookie missing")
     logger.info("[Instahyre] Login successful")
 
 
 def get_instahyre_profile(session: requests.Session) -> dict:
-    logger.info("[Instahyre] Fetching profile")
     response = session.get(INSTAHYRE_PROFILE_URL, timeout=30)
     response.raise_for_status()
-    profile = response.json()
-    logger.info(
-        f"[Instahyre] Profile loaded for {profile['user']['full_name']}"
-    )
-    return profile
+    return response.json()
 
 
 def refresh_instahyre_resume(session: requests.Session, profile: dict) -> dict:
     candidate_id = profile["id"]
     resume_id = profile["resume"]["id"]
 
-    logger.info(
-        f"[Instahyre] Refreshing resume (Candidate={candidate_id}, Resume={resume_id})"
-    )
     payload = get_resume_payload(
         pdf_path=RESUME_FILE,
         candidate_id=candidate_id,
@@ -195,9 +182,6 @@ def refresh_instahyre_resume(session: requests.Session, profile: dict) -> dict:
     if not result.get("is_fresh"):
         raise Exception("Instahyre resume refresh failed: is_fresh=False")
 
-    logger.info(
-        f"[Instahyre] Resume refreshed successfully at {result.get('uploaded_on')}"
-    )
     return result
 
 
@@ -205,7 +189,6 @@ def refresh_instahyre_jsp(session: requests.Session, profile: dict) -> dict:
     jsp = profile["jsp"]
     jsp_id = jsp["id"]
 
-    logger.info(f"[Instahyre] Refreshing JSP/Profile (JSP={jsp_id})")
     response = session.put(
         f"https://www.instahyre.com/api/v1/candidate_misc/profile/candidate_jsp/{jsp_id}",
         json=jsp,
@@ -219,45 +202,24 @@ def refresh_instahyre_jsp(session: requests.Session, profile: dict) -> dict:
         timeout=60,
     )
     response.raise_for_status()
-    logger.info("[Instahyre] JSP/Profile refresh completed")
     return response.json()
 
 
 def logout_instahyre(session: requests.Session) -> None:
     try:
-        logger.info("[Instahyre] Logging out...")
-        response = session.get(
+        session.get(
             INSTAHYRE_LOGOUT_URL,
-            headers={
-                "Referer": "https://www.instahyre.com/candidate/profile/",
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/136.0.0.0 Safari/537.36"
-                ),
-            },
+            headers={"Referer": "https://www.instahyre.com/candidate/profile/"},
             timeout=30,
             allow_redirects=False,
         )
-        if response.status_code in [200, 302]:
-            logger.info(
-                f"[Instahyre] Logout successful (Status={response.status_code})"
-            )
-        elif response.status_code == 403:
-            logger.warning("[Instahyre] Logout returned 403. Ignoring.")
-        else:
-            logger.warning(
-                f"[Instahyre] Unexpected logout status: {response.status_code}"
-            )
     except Exception as e:
         logger.warning(f"[Instahyre] Logout failed: {e}")
 
 
-def run_instahyre() -> tuple[str, str]:
-    if not INSTAHYRE_EMAIL:
-        raise Exception("INSTAHYRE_EMAIL environment variable not set")
-    if not INSTAHYRE_PASSWORD:
-        raise Exception("INSTAHYRE_PASSWORD environment variable not set")
+def run_instahyre() -> dict:
+    if not INSTAHYRE_EMAIL or not INSTAHYRE_PASSWORD:
+        raise Exception("Missing Instahyre credentials.")
     if not os.path.exists(RESUME_FILE):
         raise FileNotFoundError(f"Resume file not found: {RESUME_FILE}")
 
@@ -267,41 +229,35 @@ def run_instahyre() -> tuple[str, str]:
         profile = get_instahyre_profile(session)
 
         old_uploaded_on = profile["resume"]["uploaded_on"]
-        logger.info(f"[Instahyre] Current resume timestamp: {old_uploaded_on}")
-
         refresh_instahyre_resume(session, profile)
 
         profile_after_resume = get_instahyre_profile(session)
-        old_profile_update_ts = None
-        updates = profile_after_resume.get("profile_field_updates", [])
-        if updates:
-            old_profile_update_ts = updates[0].get("last_modified_at")
+        old_profile_ts = (
+            profile_after_resume.get("profile_field_updates", [{}])[0].get(
+                "last_modified_at"
+            )
+            if profile_after_resume.get("profile_field_updates")
+            else None
+        )
 
         refresh_instahyre_jsp(session, profile_after_resume)
 
         updated_profile = get_instahyre_profile(session)
         new_uploaded_on = updated_profile["resume"]["uploaded_on"]
-        logger.info(f"[Instahyre] Updated resume timestamp: {new_uploaded_on}")
-
-        new_profile_update_ts = None
-        updates = updated_profile.get("profile_field_updates", [])
-        if updates:
-            new_profile_update_ts = updates[0].get("last_modified_at")
-
-        if old_profile_update_ts == new_profile_update_ts:
-            logger.warning(
-                "[Instahyre] JSP refresh did not change profile timestamp"
+        new_profile_ts = (
+            updated_profile.get("profile_field_updates", [{}])[0].get(
+                "last_modified_at"
             )
-        else:
-            logger.info("[Instahyre] JSP refresh verified successfully")
+            if updated_profile.get("profile_field_updates")
+            else None
+        )
 
-        if old_uploaded_on == new_uploaded_on:
-            raise Exception(
-                "Instahyre upload succeeded but timestamp did not change"
-            )
-
-        logger.info("[Instahyre] Refresh flow fully verified")
-        return str(new_uploaded_on), str(new_profile_update_ts)
+        return {
+            "old_resume": old_uploaded_on,
+            "new_resume": new_uploaded_on,
+            "old_profile": old_profile_ts,
+            "new_profile": new_profile_ts,
+        }
 
     finally:
         logout_instahyre(session)
@@ -313,11 +269,9 @@ def run_instahyre() -> tuple[str, str]:
 # ============================================================
 
 
-def run_naukri() -> str:
+def run_naukri() -> dict:
     if not NAUKRI_USERNAME or not NAUKRI_PASSWORD:
-        raise Exception(
-            "NAUKRI_USERNAME or NAUKRI_PASSWORD environment variable not set"
-        )
+        raise Exception("Missing Naukri credentials.")
 
     session = requests.Session()
 
@@ -327,66 +281,96 @@ def run_naukri() -> str:
 
     session.headers.update({
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
         ),
         "clientid": "d3skt0p",
-        "appid": "109",
-        "systemid": "jobseeker",
+        "appid": "1950",
+        "systemid": "Naukri",
         "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
         "Origin": "https://www.naukri.com",
-        "Referer": "https://www.naukri.com/nlogin/login",
+        "Referer": "https://www.naukri.com/mnjuser/profile?id=&altresid",
     })
 
     # 1. Login via central-login-services
     logger.info("[Naukri] Logging in...")
-    login_res = session.post(
-        NAUKRI_LOGIN_URL,
-        json={"username": NAUKRI_USERNAME, "password": NAUKRI_PASSWORD},
-        timeout=30,
-    )
+    login_payload = {"username": NAUKRI_USERNAME, "password": NAUKRI_PASSWORD}
+
+    login_res = session.post(NAUKRI_LOGIN_URL, json=login_payload, timeout=30)
     login_res.raise_for_status()
 
     login_data = login_res.json()
-    token = login_data.get("token") or login_data.get("accessToken")
-    if token:
-        session.headers.update({"Authorization": f"Bearer {token}"})
+    cookies_list = login_data.get("cookies", [])
+    for c in cookies_list:
+        session.cookies.set(
+            c["name"], c["value"], domain=c.get("domain", ".naukri.com")
+        )
+        if c["name"] == "nauk_at":
+            session.headers.update({"Authorization": f"Bearer {c['value']}"})
+
     logger.info("[Naukri] Authentication successful")
 
-    # 2. Get current headline
-    logger.info("[Naukri] Fetching current resume headline...")
-    get_res = session.get(NAUKRI_HEADLINE_URL, timeout=30)
-    get_res.raise_for_status()
-    current_headline = (
-        get_res.json().get("resumeHeadline", {}).get("text", "").strip()
+    # 2. Fetch current profile state
+    logger.info("[Naukri] Fetching current profile details...")
+    profile_res = session.post(
+        NAUKRI_PROFILE_GET_URL, json={"fieldMasks": []}, timeout=30
+    )
+    profile_res.raise_for_status()
+    profile_json = profile_res.json()
+
+    profile_items = profile_json.get("data", {}).get("profile", [])
+    if not profile_items:
+        raise Exception(
+            "Failed to locate profile item in Naukri profile response"
+        )
+
+    profile_obj = profile_items[0]
+    profile_id = profile_obj.get("profileId")
+    current_summary = profile_obj.get("summary", "").strip()
+    old_mod_time = profile_obj.get("lastModTime")
+    old_mod_ago = profile_obj.get("lastModAgo")
+
+    if not current_summary or not profile_id:
+        raise Exception("Could not find profileId or summary to refresh")
+
+    # 3. Toggle trailing period on summary
+    new_summary = (
+        current_summary[:-1]
+        if current_summary.endswith(".")
+        else f"{current_summary}."
     )
 
-    if not current_headline:
-        raise Exception("Failed to retrieve current resume headline from Naukri")
+    # 4. Submit updated summary
+    logger.info("[Naukri] Submitting summary mutation to refresh timestamp...")
+    update_payload = {
+        "fieldMasks": [],
+        "data": {"profile": {"summary": new_summary}, "profileId": profile_id},
+    }
 
-    # 3. Toggle trailing dot
-    new_headline = (
-        current_headline[:-1]
-        if current_headline.endswith(".")
-        else f"{current_headline}."
-    )
-
-    # 4. Save headline update
-    logger.info("[Naukri] Submitting updated headline...")
-    update_res = session.put(
-        NAUKRI_HEADLINE_URL,
-        json={"resumeHeadline": new_headline},
-        timeout=30,
+    update_res = session.post(
+        NAUKRI_PROFILE_UPDATE_URL, json=update_payload, timeout=30
     )
     update_res.raise_for_status()
 
-    logger.info("[Naukri] Headline updated successfully")
-    return new_headline
+    # 5. Fetch updated profile to verify timestamp change
+    verify_res = session.post(
+        NAUKRI_PROFILE_GET_URL, json={"fieldMasks": []}, timeout=30
+    )
+    verify_res.raise_for_status()
+    new_profile_obj = verify_res.json().get("data", {}).get("profile", [])[0]
+    new_mod_time = new_profile_obj.get("lastModTime")
+    new_mod_ago = new_profile_obj.get("lastModAgo")
+
+    return {
+        "old_time": old_mod_time,
+        "new_time": new_mod_time,
+        "badge": new_mod_ago,
+    }
 
 
 # ============================================================
-# MAIN ORCHESTRATION
+# MAIN ORCHESTRATION & TELEGRAM REPORTING
 # ============================================================
 
 
@@ -399,24 +383,28 @@ def main():
 
     # 1. Execute Instahyre
     try:
-        instahyre_resume_ts, instahyre_profile_ts = run_instahyre()
+        instahyre_data = run_instahyre()
         reports.append(
             f"🟢 *Instahyre: Success*\n"
-            f"• Resume: {instahyre_resume_ts}\n"
-            f"• Profile: {instahyre_profile_ts}"
+            f"  • *Resume:* `{instahyre_data['new_resume']}`\n"
+            f"  • *Profile:* `{instahyre_data['new_profile']}`"
         )
     except Exception as e:
         logger.exception(f"Instahyre refresh failed: {e}")
-        reports.append(f"🔴 *Instahyre: Failed*\n• Reason: {str(e)}")
+        reports.append(f"🔴 *Instahyre: Failed*\n  • *Reason:* `{str(e)}`")
         has_failure = True
 
     # 2. Execute Naukri
     try:
-        naukri_headline = run_naukri()
-        reports.append("🟢 *Naukri: Success*\n• Status: Headline toggled")
+        naukri_data = run_naukri()
+        reports.append(
+            f"🟢 *Naukri: Success*\n"
+            f"  • *Updated:* `{naukri_data['new_time']}`\n"
+            f"  • *Recruiter Badge:* `{naukri_data['badge']}` (Active)"
+        )
     except Exception as e:
         logger.exception(f"Naukri refresh failed: {e}")
-        reports.append(f"🔴 *Naukri: Failed*\n• Reason: {str(e)}")
+        reports.append(f"🔴 *Naukri: Failed*\n  • *Reason:* `{str(e)}`")
         has_failure = True
 
     # 3. Execution Metrics & Consolidated Alert
@@ -426,13 +414,21 @@ def main():
         f"{j_mins}m {j_secs}s" if jitter_applied > 0 else "None (Bypassed/Local)"
     )
 
-    overall_status = "⚠️ Daily Refresh Finished with Issues" if has_failure else "✅ Daily Profile Refresh Successful"
+    overall_header = (
+        "⚠️ *Profile Refresh Finished with Issues*"
+        if has_failure
+        else "🚀 *Daily Profile Refresh Completed*"
+    )
+    current_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     msg_lines = [
-        overall_status,
+        overall_header,
         "",
         f"⏱ *Jitter Delay:* {jitter_str}",
-        f"⚡ *Execution:* {exec_duration}s",
-        f"🕒 *Timestamp:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"⚡ *Execution Time:* {exec_duration}s",
+        f"🕒 *Run Timestamp:* `{current_ts}`",
+        "",
+        "---",
         "",
         *reports,
     ]
@@ -451,7 +447,7 @@ if __name__ == "__main__":
         logger.exception(f"Fatal orchestration error: {e}")
         try:
             send_telegram(
-                f"❌ Profile Refresh Fatal Crash\n\nReason: {str(e)}"
+                f"❌ *Fatal Orchestration Crash*\n\nReason: `{str(e)}`"
             )
         except Exception:
             pass
