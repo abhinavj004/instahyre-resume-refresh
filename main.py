@@ -38,8 +38,8 @@ NAUKRI_USERNAME = os.getenv("NAUKRI_USERNAME")
 NAUKRI_PASSWORD = os.getenv("NAUKRI_PASSWORD")
 NAUKRI_PROXY_URL = os.getenv("NAUKRI_PROXY_URL")
 
-NAUKRI_LOGIN_URL = "https://login.naukri.com/v1/login"
-NAUKRI_PROFILE_URL = "https://www.naukri.com/gateway/v1/profile"
+# Accurate Central Microservice Gateways
+NAUKRI_LOGIN_URL = "https://www.naukri.com/central-login-services/v1/login"
 NAUKRI_HEADLINE_URL = "https://www.naukri.com/gateway/v1/profile/resume-headline"
 
 # ============================================================
@@ -65,12 +65,16 @@ logger = logging.getLogger(__name__)
 
 
 def apply_jitter(min_seconds: int = 60, max_seconds: int = 900) -> int:
-    """Applies a random delay in CI/GitHub Actions to prevent static time footprints."""
-    is_ci = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
+    """Applies a random delay in CI/GitHub Actions.
 
-    if not is_ci:
+    Can be bypassed by setting SKIP_JITTER=true.
+    """
+    is_ci = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
+    skip = os.getenv("SKIP_JITTER", "false").lower() == "true"
+
+    if not is_ci or skip:
         logger.info(
-            "Local environment detected: Skipping schedule jitter for fast testing."
+            "Jitter bypass active / Local environment: Skipping schedule jitter."
         )
         return 0
 
@@ -326,13 +330,16 @@ def run_naukri() -> str:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
         ),
-        "clientid": "naukri",
+        "clientid": "d3skt0p",
         "appid": "109",
-        "systemid": "naukri",
+        "systemid": "jobseeker",
         "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Origin": "https://www.naukri.com",
+        "Referer": "https://www.naukri.com/nlogin/login",
     })
 
-    # 1. Login
+    # 1. Login via central-login-services
     logger.info("[Naukri] Logging in...")
     login_res = session.post(
         NAUKRI_LOGIN_URL,
@@ -347,7 +354,7 @@ def run_naukri() -> str:
         session.headers.update({"Authorization": f"Bearer {token}"})
     logger.info("[Naukri] Authentication successful")
 
-    # 2. Get headline
+    # 2. Get current headline
     logger.info("[Naukri] Fetching current resume headline...")
     get_res = session.get(NAUKRI_HEADLINE_URL, timeout=30)
     get_res.raise_for_status()
@@ -416,7 +423,7 @@ def main():
     exec_duration = round(time.time() - exec_start, 2)
     j_mins, j_secs = divmod(jitter_applied, 60)
     jitter_str = (
-        f"{j_mins}m {j_secs}s" if jitter_applied > 0 else "None (Local)"
+        f"{j_mins}m {j_secs}s" if jitter_applied > 0 else "None (Bypassed/Local)"
     )
 
     overall_status = "⚠️ Daily Refresh Finished with Issues" if has_failure else "✅ Daily Profile Refresh Successful"
