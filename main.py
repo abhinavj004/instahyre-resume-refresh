@@ -357,7 +357,7 @@ def run_naukri() -> dict:
 
 
 def main():
-    jitter_applied = apply_jitter(min_seconds=60, max_seconds=900)
+    jitter_applied = apply_jitter(min_seconds=1, max_seconds=2)
     exec_start = time.time()
 
     reports = []
