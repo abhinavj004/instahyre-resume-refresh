@@ -1,13 +1,14 @@
-import os
-import sys
 import logging
-import requests
+import os
+import random
+import sys
+import time
 
+from dotenv import load_dotenv
+from helper import get_resume_payload
+import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from dotenv import load_dotenv
-
-from helper import get_resume_payload
 
 # ============================================================
 # LOAD ENV
@@ -37,6 +38,30 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# JITTER / SCHEDULE RANDOMIZATION
+# ============================================================
+
+
+def apply_jitter(min_seconds: int = 60, max_seconds: int = 900) -> int:
+    """Applies a random delay between min_seconds and max_seconds in CI/GitHub Actions."""
+    is_ci = os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("CI") == "true"
+
+    if not is_ci:
+        logger.info(
+            "Local environment detected: Skipping schedule jitter for fast testing."
+        )
+        return 0
+
+    delay = random.randint(min_seconds, max_seconds)
+    mins, secs = divmod(delay, 60)
+    logger.info(
+        f"CI trigger detected. Applying random jitter: waiting for {mins}m {secs}s..."
+    )
+    time.sleep(delay)
+    return delay
+
 
 # ============================================================
 # SESSION
@@ -110,7 +135,7 @@ def get_profile(session):
 
     profile = response.json()
 
-    logger.info(f"Profile loaded for " f"{profile['user']['full_name']}")
+    logger.info(f"Profile loaded for {profile['user']['full_name']}")
 
     return profile
 
@@ -124,7 +149,9 @@ def refresh_resume(session, profile):
     candidate_id = profile["id"]
     resume_id = profile["resume"]["id"]
 
-    logger.info(f"Refreshing resume " f"(Candidate={candidate_id}, Resume={resume_id})")
+    logger.info(
+        f"Refreshing resume (Candidate={candidate_id}, Resume={resume_id})"
+    )
 
     payload = get_resume_payload(
         pdf_path=RESUME_FILE,
@@ -133,9 +160,7 @@ def refresh_resume(session, profile):
         filename=os.path.basename(RESUME_FILE),
     )
 
-    upload_url = (
-        f"https://www.instahyre.com/api/v1/candidate_misc/profile/resume/{resume_id}"
-    )
+    upload_url = f"https://www.instahyre.com/api/v1/candidate_misc/profile/resume/{resume_id}"
 
     response = session.put(
         upload_url,
@@ -157,17 +182,18 @@ def refresh_resume(session, profile):
     if not result.get("is_fresh"):
         raise Exception("Resume refresh failed. is_fresh=False")
 
-    logger.info(f"Resume refreshed successfully at " f"{result.get('uploaded_on')}")
+    logger.info(
+        f"Resume refreshed successfully at {result.get('uploaded_on')}"
+    )
 
     return result
 
 
 def refresh_jsp(session, profile):
-
     jsp = profile["jsp"]
     jsp_id = jsp["id"]
 
-    logger.info(f"Refreshing JSP/Profile " f"(JSP={jsp_id})")
+    logger.info(f"Refreshing JSP/Profile (JSP={jsp_id})")
 
     response = session.put(
         f"https://www.instahyre.com/api/v1/candidate_misc/profile/candidate_jsp/{jsp_id}",
@@ -219,7 +245,9 @@ def logout(session):
             logger.warning("Logout returned 403. Ignoring.")
 
         else:
-            logger.warning(f"Unexpected logout status: " f"{response.status_code}")
+            logger.warning(
+                f"Unexpected logout status: {response.status_code}"
+            )
 
     except Exception as e:
         logger.warning(f"Logout failed: {e}")
@@ -252,7 +280,6 @@ def send_telegram(message):
 
 
 def main():
-
     if not EMAIL:
         raise Exception("INSTAHYRE_EMAIL environment variable not set")
 
@@ -262,26 +289,26 @@ def main():
     if not os.path.exists(RESUME_FILE):
         raise FileNotFoundError(f"Resume file not found: {RESUME_FILE}")
 
+    # 1. Apply Jitter Delay (1 to 15 mins) if running on GitHub Actions
+    jitter_applied = apply_jitter(min_seconds=60, max_seconds=900)
+    exec_start = time.time()
+
     session = create_session()
 
     try:
-
         login(session)
 
         profile = get_profile(session)
 
         old_uploaded_on = profile["resume"]["uploaded_on"]
-
-        logger.info(f"Current resume timestamp: " f"{old_uploaded_on}")
+        logger.info(f"Current resume timestamp: {old_uploaded_on}")
 
         result = refresh_resume(session, profile)
 
         profile_after_resume = get_profile(session)
 
         old_profile_update_ts = None
-
         updates = profile_after_resume.get("profile_field_updates", [])
-
         if updates:
             old_profile_update_ts = updates[0].get("last_modified_at")
 
@@ -290,12 +317,10 @@ def main():
         updated_profile = get_profile(session)
 
         new_uploaded_on = updated_profile["resume"]["uploaded_on"]
+        logger.info(f"Updated resume timestamp: {new_uploaded_on}")
 
-        logger.info(f"Updated resume timestamp: " f"{new_uploaded_on}")
         new_profile_update_ts = None
-
         updates = updated_profile.get("profile_field_updates", [])
-
         if updates:
             new_profile_update_ts = updates[0].get("last_modified_at")
 
@@ -305,36 +330,41 @@ def main():
             logger.info("JSP refresh verified successfully")
 
         if old_uploaded_on == new_uploaded_on:
-            raise Exception("Resume upload succeeded " "but timestamp did not change")
+            raise Exception("Resume upload succeeded but timestamp did not change")
 
         logger.info("Resume refresh verified successfully")
+
+        # Format execution metrics
+        exec_duration = round(time.time() - exec_start, 2)
+        j_mins, j_secs = divmod(jitter_applied, 60)
+
+        jitter_str = f"{j_mins}m {j_secs}s" if jitter_applied > 0 else "None (Local)"
+
         send_telegram(
             f"✅ Instahyre refresh successful\n\n"
+            f"⏱ Jitter Delay: {jitter_str}\n"
+            f"⚡ Execution: {exec_duration}s\n\n"
             f"Resume:\n{new_uploaded_on}\n\n"
             f"Profile:\n{new_profile_update_ts}"
         )
 
     finally:
-
         logout(session)
-
         session.close()
 
     logger.info("Job completed successfully")
 
 
 if __name__ == "__main__":
-
     try:
         main()
         sys.exit(0)
 
     except Exception as e:
-
         logger.exception(f"Job failed: {e}")
 
         try:
-            send_telegram(f"❌ Instahyre refresh failed\n\n" f"Reason:\n{str(e)}")
+            send_telegram(f"❌ Instahyre refresh failed\n\nReason:\n{str(e)}")
         except Exception:
             pass
 
