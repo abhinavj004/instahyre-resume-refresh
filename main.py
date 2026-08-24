@@ -34,11 +34,9 @@ INSTAHYRE_LOGOUT_URL = "https://www.instahyre.com/logout/"
 # CONFIG - NAUKRI
 # ============================================================
 
-NAUKRI_USERNAME = os.getenv("NAUKRI_USERNAME")
-NAUKRI_PASSWORD = os.getenv("NAUKRI_PASSWORD")
+NAUKRI_AUTH_TOKEN = os.getenv("NAUKRI_AUTH_TOKEN")
 NAUKRI_PROXY_URL = os.getenv("NAUKRI_PROXY_URL")
 
-NAUKRI_LOGIN_URL = "https://www.naukri.com/central-login-services/v1/login"
 NAUKRI_PROFILE_GET_URL = "https://www.naukri.com/cloudgateway-aurus/aurus-jobseeker-profile-wrapper/v0/jobseeker/users/self/get/fullprofiles"
 NAUKRI_PROFILE_UPDATE_URL = "https://www.naukri.com/cloudgateway-aurus/aurus-jobseeker-profile-wrapper/v0/jobseeker/users/self/update/fullprofiles"
 
@@ -265,13 +263,13 @@ def run_instahyre() -> dict:
 
 
 # ============================================================
-# NAUKRI ENGINE
+# NAUKRI ENGINE (DIRECT TOKEN AUTH)
 # ============================================================
 
 
 def run_naukri() -> dict:
-    if not NAUKRI_USERNAME or not NAUKRI_PASSWORD:
-        raise Exception("Missing Naukri credentials.")
+    if not NAUKRI_AUTH_TOKEN:
+        raise Exception("NAUKRI_AUTH_TOKEN environment variable not set")
 
     session = requests.Session()
 
@@ -279,53 +277,11 @@ def run_naukri() -> dict:
         logger.info("[Naukri] Using configured proxy for request routing")
         session.proxies = {"http": NAUKRI_PROXY_URL, "https": NAUKRI_PROXY_URL}
 
-    # 1. Exact Central Login Execution matching HAR trace
-    logger.info("[Naukri] Logging in...")
-    login_headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
-        ),
-        "clientid": "d3skt0p",
-        "appid": "103",
-        "systemid": "jobseeker",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Origin": "https://www.naukri.com",
-        "Referer": "https://www.naukri.com/",
-    }
+    token = NAUKRI_AUTH_TOKEN.strip()
 
-    login_payload = {
-        "username": NAUKRI_USERNAME.strip(),
-        "password": NAUKRI_PASSWORD.strip(),
-    }
-
-    login_res = session.post(
-        NAUKRI_LOGIN_URL,
-        json=login_payload,
-        headers=login_headers,
-        timeout=30,
-    )
-
-    if login_res.status_code != 200:
-        logger.error(f"[Naukri] Login failed response body: {login_res.text}")
-    login_res.raise_for_status()
-
-    login_data = login_res.json()
-    cookies_list = login_data.get("cookies", [])
-    jwt_token = None
-
-    for c in cookies_list:
-        session.cookies.set(
-            c["name"], c["value"], domain=c.get("domain", ".naukri.com")
-        )
-        if c["name"] == "nauk_at":
-            jwt_token = c["value"]
-
-    logger.info("[Naukri] Authentication successful")
-
-    # 2. Configure Profile Gateway Headers
-    profile_headers = {
+    # Set authentication cookie and Bearer header
+    session.cookies.set("nauk_at", token, domain=".naukri.com")
+    session.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
@@ -337,13 +293,10 @@ def run_naukri() -> dict:
         "Content-Type": "application/json",
         "Origin": "https://www.naukri.com",
         "Referer": "https://www.naukri.com/mnjuser/profile?id=&altresid",
-    }
-    if jwt_token:
-        profile_headers["Authorization"] = f"Bearer {jwt_token}"
+        "Authorization": f"Bearer {token}",
+    })
 
-    session.headers.update(profile_headers)
-
-    # 3. Fetch current profile state
+    # 1. Fetch current profile state
     logger.info("[Naukri] Fetching current profile details...")
     profile_res = session.post(
         NAUKRI_PROFILE_GET_URL, json={"fieldMasks": []}, timeout=30
@@ -353,9 +306,7 @@ def run_naukri() -> dict:
 
     profile_items = profile_json.get("data", {}).get("profile", [])
     if not profile_items:
-        raise Exception(
-            "Failed to locate profile item in Naukri profile response"
-        )
+        raise Exception("Failed to locate profile item in Naukri profile response")
 
     profile_obj = profile_items[0]
     profile_id = profile_obj.get("profileId")
@@ -365,14 +316,14 @@ def run_naukri() -> dict:
     if not current_summary or not profile_id:
         raise Exception("Could not find profileId or summary to refresh")
 
-    # 4. Toggle trailing period on summary
+    # 2. Toggle trailing period on summary
     new_summary = (
         current_summary[:-1]
         if current_summary.endswith(".")
         else f"{current_summary}."
     )
 
-    # 5. Submit updated summary
+    # 3. Submit updated summary
     logger.info("[Naukri] Submitting summary mutation to refresh timestamp...")
     update_payload = {
         "fieldMasks": [],
@@ -384,7 +335,7 @@ def run_naukri() -> dict:
     )
     update_res.raise_for_status()
 
-    # 6. Fetch updated profile to verify timestamp change
+    # 4. Fetch updated profile to verify timestamp change
     verify_res = session.post(
         NAUKRI_PROFILE_GET_URL, json={"fieldMasks": []}, timeout=30
     )
@@ -406,7 +357,7 @@ def run_naukri() -> dict:
 
 
 def main():
-    jitter_applied = apply_jitter(min_seconds=1, max_seconds=2)
+    jitter_applied = apply_jitter(min_seconds=60, max_seconds=900)
     exec_start = time.time()
 
     reports = []
