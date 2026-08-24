@@ -279,7 +279,7 @@ def run_naukri() -> dict:
         logger.info("[Naukri] Using configured proxy for request routing")
         session.proxies = {"http": NAUKRI_PROXY_URL, "https": NAUKRI_PROXY_URL}
 
-    # 1. Login via central-login-services with correct auth headers
+    # 1. Exact Central Login Execution matching HAR trace
     logger.info("[Naukri] Logging in...")
     login_headers = {
         "User-Agent": (
@@ -287,18 +287,17 @@ def run_naukri() -> dict:
             "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
         ),
         "clientid": "d3skt0p",
-        "appid": "109",
-        "systemid": "naukri",
+        "appid": "103",
+        "systemid": "jobseeker",
         "Accept": "application/json",
         "Content-Type": "application/json",
         "Origin": "https://www.naukri.com",
-        "Referer": "https://www.naukri.com/nlogin/login",
+        "Referer": "https://www.naukri.com/",
     }
 
     login_payload = {
         "username": NAUKRI_USERNAME.strip(),
         "password": NAUKRI_PASSWORD.strip(),
-        "userType": "jobseeker",
     }
 
     login_res = session.post(
@@ -362,7 +361,6 @@ def run_naukri() -> dict:
     profile_id = profile_obj.get("profileId")
     current_summary = profile_obj.get("summary", "").strip()
     old_mod_time = profile_obj.get("lastModTime")
-    old_mod_ago = profile_obj.get("lastModAgo")
 
     if not current_summary or not profile_id:
         raise Exception("Could not find profileId or summary to refresh")
