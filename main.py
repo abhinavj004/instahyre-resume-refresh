@@ -279,7 +279,54 @@ def run_naukri() -> dict:
         logger.info("[Naukri] Using configured proxy for request routing")
         session.proxies = {"http": NAUKRI_PROXY_URL, "https": NAUKRI_PROXY_URL}
 
-    session.headers.update({
+    # 1. Login via central-login-services with correct auth headers
+    logger.info("[Naukri] Logging in...")
+    login_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+        ),
+        "clientid": "d3skt0p",
+        "appid": "109",
+        "systemid": "naukri",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Origin": "https://www.naukri.com",
+        "Referer": "https://www.naukri.com/nlogin/login",
+    }
+
+    login_payload = {
+        "username": NAUKRI_USERNAME.strip(),
+        "password": NAUKRI_PASSWORD.strip(),
+        "userType": "jobseeker",
+    }
+
+    login_res = session.post(
+        NAUKRI_LOGIN_URL,
+        json=login_payload,
+        headers=login_headers,
+        timeout=30,
+    )
+
+    if login_res.status_code != 200:
+        logger.error(f"[Naukri] Login failed response body: {login_res.text}")
+    login_res.raise_for_status()
+
+    login_data = login_res.json()
+    cookies_list = login_data.get("cookies", [])
+    jwt_token = None
+
+    for c in cookies_list:
+        session.cookies.set(
+            c["name"], c["value"], domain=c.get("domain", ".naukri.com")
+        )
+        if c["name"] == "nauk_at":
+            jwt_token = c["value"]
+
+    logger.info("[Naukri] Authentication successful")
+
+    # 2. Configure Profile Gateway Headers
+    profile_headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
@@ -291,27 +338,13 @@ def run_naukri() -> dict:
         "Content-Type": "application/json",
         "Origin": "https://www.naukri.com",
         "Referer": "https://www.naukri.com/mnjuser/profile?id=&altresid",
-    })
+    }
+    if jwt_token:
+        profile_headers["Authorization"] = f"Bearer {jwt_token}"
 
-    # 1. Login via central-login-services
-    logger.info("[Naukri] Logging in...")
-    login_payload = {"username": NAUKRI_USERNAME, "password": NAUKRI_PASSWORD}
+    session.headers.update(profile_headers)
 
-    login_res = session.post(NAUKRI_LOGIN_URL, json=login_payload, timeout=30)
-    login_res.raise_for_status()
-
-    login_data = login_res.json()
-    cookies_list = login_data.get("cookies", [])
-    for c in cookies_list:
-        session.cookies.set(
-            c["name"], c["value"], domain=c.get("domain", ".naukri.com")
-        )
-        if c["name"] == "nauk_at":
-            session.headers.update({"Authorization": f"Bearer {c['value']}"})
-
-    logger.info("[Naukri] Authentication successful")
-
-    # 2. Fetch current profile state
+    # 3. Fetch current profile state
     logger.info("[Naukri] Fetching current profile details...")
     profile_res = session.post(
         NAUKRI_PROFILE_GET_URL, json={"fieldMasks": []}, timeout=30
@@ -334,14 +367,14 @@ def run_naukri() -> dict:
     if not current_summary or not profile_id:
         raise Exception("Could not find profileId or summary to refresh")
 
-    # 3. Toggle trailing period on summary
+    # 4. Toggle trailing period on summary
     new_summary = (
         current_summary[:-1]
         if current_summary.endswith(".")
         else f"{current_summary}."
     )
 
-    # 4. Submit updated summary
+    # 5. Submit updated summary
     logger.info("[Naukri] Submitting summary mutation to refresh timestamp...")
     update_payload = {
         "fieldMasks": [],
@@ -353,7 +386,7 @@ def run_naukri() -> dict:
     )
     update_res.raise_for_status()
 
-    # 5. Fetch updated profile to verify timestamp change
+    # 6. Fetch updated profile to verify timestamp change
     verify_res = session.post(
         NAUKRI_PROFILE_GET_URL, json={"fieldMasks": []}, timeout=30
     )
