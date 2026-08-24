@@ -28,4 +28,5 @@ jobs:
           NAUKRI_USERNAME: ${{ secrets.NAUKRI_USERNAME }}
           NAUKRI_PASSWORD: ${{ secrets.NAUKRI_PASSWORD }}
           NAUKRI_AUTH_TOKEN: ${{ secrets.NAUKRI_AUTH_TOKEN }}
+          NAUKRI_COOKIES: ${{ secrets.NAUKRI_COOKIES }}
         run: python main.py
