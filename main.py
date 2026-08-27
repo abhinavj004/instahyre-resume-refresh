@@ -8,7 +8,6 @@ from datetime import datetime
 from dotenv import load_dotenv
 from helper import get_resume_payload
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -223,7 +222,7 @@ def run_instahyre() -> dict:
 
 
 # ============================================================
-# NAUKRI ENGINE (STEALTH PLAYWRIGHT FULL FLOW)
+# NAUKRI ENGINE (NATIVE STEALTH PLAYWRIGHT FLOW)
 # ============================================================
 
 
@@ -248,16 +247,30 @@ def run_naukri() -> dict:
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
             viewport={"width": 1440, "height": 900},
+            locale="en-US",
+            timezone_id="Asia/Kolkata",
         )
+
+        # Native anti-detection scripts
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            window.chrome = { runtime: {} };
+        """)
+
         page = context.new_page()
-        stealth_sync(page)
 
         # 1. Login via web form
         logger.info("[Naukri] Navigating to login page...")
         page.goto(NAUKRI_LOGIN_URL, wait_until="networkidle", timeout=60000)
 
-        page.locator("input[placeholder*='Username'], input#usernameField").first.fill(NAUKRI_USERNAME.strip())
-        page.locator("input[placeholder*='password'], input#passwordField").first.fill(NAUKRI_PASSWORD.strip())
+        page.locator("input[placeholder*='Username'], input#usernameField").first.fill(
+            NAUKRI_USERNAME.strip()
+        )
+        page.locator("input[placeholder*='password'], input#passwordField").first.fill(
+            NAUKRI_PASSWORD.strip()
+        )
 
         logger.info("[Naukri] Submitting login credentials...")
         page.locator("button[type='submit']:has-text('Login'), .loginButton").first.click()
@@ -266,7 +279,6 @@ def run_naukri() -> dict:
             page.wait_for_url("**/mnjuser/**", timeout=30000)
             logger.info("[Naukri] Login successful")
         except Exception:
-            # Check for bot challenge or OTP trigger
             if page.locator("text='Enter OTP'").is_visible() or page.locator("text='Verification'").is_visible():
                 browser.close()
                 raise Exception("Naukri triggered MFA/OTP challenge on login.")
@@ -307,7 +319,9 @@ def run_naukri() -> dict:
 
         # 5. Save Changes
         logger.info("[Naukri] Submitting updated profile summary...")
-        save_btn = page.locator("button:has-text('Save'), form button[type='submit']").first
+        save_btn = page.locator(
+            "button:has-text('Save'), form button[type='submit']"
+        ).first
         save_btn.click()
         page.wait_for_timeout(4000)
 
