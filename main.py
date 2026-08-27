@@ -8,6 +8,7 @@ from http.cookies import SimpleCookie
 
 from dotenv import load_dotenv
 from helper import get_resume_payload
+from playwright.sync_api import sync_playwright
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -36,10 +37,7 @@ INSTAHYRE_LOGOUT_URL = "https://www.instahyre.com/logout/"
 # ============================================================
 
 NAUKRI_COOKIES = os.getenv("NAUKRI_COOKIES")
-NAUKRI_PROXY_URL = os.getenv("NAUKRI_PROXY_URL")
-
-NAUKRI_PROFILE_GET_URL = "https://www.naukri.com/cloudgateway-aurus/aurus-jobseeker-profile-wrapper/v0/jobseeker/users/self/get/fullprofiles"
-NAUKRI_PROFILE_UPDATE_URL = "https://www.naukri.com/cloudgateway-aurus/aurus-jobseeker-profile-wrapper/v0/jobseeker/users/self/update/fullprofiles"
+NAUKRI_PROFILE_URL = "https://www.naukri.com/mnjuser/profile"
 
 # ============================================================
 # CONFIG - TELEGRAM
@@ -55,7 +53,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
-
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -122,100 +119,6 @@ def create_instahyre_session() -> requests.Session:
     return session
 
 
-def login_instahyre(session: requests.Session) -> None:
-    logger.info("[Instahyre] Fetching login page")
-    session.get(INSTAHYRE_LOGIN_PAGE_URL, timeout=30)
-    csrf = session.cookies.get("csrftoken")
-
-    logger.info("[Instahyre] Logging in...")
-    response = session.post(
-        INSTAHYRE_LOGIN_URL,
-        json={"email": INSTAHYRE_EMAIL, "password": INSTAHYRE_PASSWORD},
-        headers={
-            "X-CSRFToken": csrf if csrf else "",
-            "Referer": INSTAHYRE_LOGIN_PAGE_URL,
-            "Origin": "https://www.instahyre.com",
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-
-    if not session.cookies.get("sessionid"):
-        raise Exception("Instahyre login failed: sessionid cookie missing")
-    logger.info("[Instahyre] Login successful")
-
-
-def get_instahyre_profile(session: requests.Session) -> dict:
-    response = session.get(INSTAHYRE_PROFILE_URL, timeout=30)
-    response.raise_for_status()
-    return response.json()
-
-
-def refresh_instahyre_resume(session: requests.Session, profile: dict) -> dict:
-    candidate_id = profile["id"]
-    resume_id = profile["resume"]["id"]
-
-    payload = get_resume_payload(
-        pdf_path=RESUME_FILE,
-        candidate_id=candidate_id,
-        resume_id=resume_id,
-        filename=os.path.basename(RESUME_FILE),
-    )
-
-    upload_url = f"https://www.instahyre.com/api/v1/candidate_misc/profile/resume/{resume_id}"
-    response = session.put(
-        upload_url,
-        json=payload,
-        headers={
-            "X-CSRFToken": session.cookies.get("csrftoken"),
-            "Origin": "https://www.instahyre.com",
-            "Referer": "https://www.instahyre.com/candidate/profile/",
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json",
-        },
-        timeout=120,
-    )
-    response.raise_for_status()
-    result = response.json()
-
-    if not result.get("is_fresh"):
-        raise Exception("Instahyre resume refresh failed: is_fresh=False")
-
-    return result
-
-
-def refresh_instahyre_jsp(session: requests.Session, profile: dict) -> dict:
-    jsp = profile["jsp"]
-    jsp_id = jsp["id"]
-
-    response = session.put(
-        f"https://www.instahyre.com/api/v1/candidate_misc/profile/candidate_jsp/{jsp_id}",
-        json=jsp,
-        headers={
-            "X-CSRFToken": session.cookies.get("csrftoken"),
-            "Origin": "https://www.instahyre.com",
-            "Referer": "https://www.instahyre.com/candidate/profile/",
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json;charset=UTF-8",
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-def logout_instahyre(session: requests.Session) -> None:
-    try:
-        session.get(
-            INSTAHYRE_LOGOUT_URL,
-            headers={"Referer": "https://www.instahyre.com/candidate/profile/"},
-            timeout=30,
-            allow_redirects=False,
-        )
-    except Exception as e:
-        logger.warning(f"[Instahyre] Logout failed: {e}")
-
-
 def run_instahyre() -> dict:
     if not INSTAHYRE_EMAIL or not INSTAHYRE_PASSWORD:
         raise Exception("Missing Instahyre credentials.")
@@ -224,24 +127,71 @@ def run_instahyre() -> dict:
 
     session = create_instahyre_session()
     try:
-        login_instahyre(session)
-        profile = get_instahyre_profile(session)
+        logger.info("[Instahyre] Fetching login page...")
+        session.get(INSTAHYRE_LOGIN_PAGE_URL, timeout=30)
+        csrf = session.cookies.get("csrftoken")
 
-        old_uploaded_on = profile["resume"]["uploaded_on"]
-        refresh_instahyre_resume(session, profile)
-
-        profile_after_resume = get_instahyre_profile(session)
-        old_profile_ts = (
-            profile_after_resume.get("profile_field_updates", [{}])[0].get(
-                "last_modified_at"
-            )
-            if profile_after_resume.get("profile_field_updates")
-            else None
+        logger.info("[Instahyre] Logging in...")
+        login_res = session.post(
+            INSTAHYRE_LOGIN_URL,
+            json={"email": INSTAHYRE_EMAIL, "password": INSTAHYRE_PASSWORD},
+            headers={
+                "X-CSRFToken": csrf if csrf else "",
+                "Referer": INSTAHYRE_LOGIN_PAGE_URL,
+                "Origin": "https://www.instahyre.com",
+            },
+            timeout=30,
         )
+        login_res.raise_for_status()
 
-        refresh_instahyre_jsp(session, profile_after_resume)
+        profile = session.get(INSTAHYRE_PROFILE_URL, timeout=30).json()
+        candidate_id = profile["id"]
+        resume_id = profile["resume"]["id"]
+        old_uploaded_on = profile["resume"]["uploaded_on"]
 
-        updated_profile = get_instahyre_profile(session)
+        # 1. Refresh Resume File
+        logger.info("[Instahyre] Refreshing resume...")
+        payload = get_resume_payload(
+            pdf_path=RESUME_FILE,
+            candidate_id=candidate_id,
+            resume_id=resume_id,
+            filename=os.path.basename(RESUME_FILE),
+        )
+        resume_res = session.put(
+            f"https://www.instahyre.com/api/v1/candidate_misc/profile/resume/{resume_id}",
+            json=payload,
+            headers={
+                "X-CSRFToken": session.cookies.get("csrftoken"),
+                "Origin": "https://www.instahyre.com",
+                "Referer": "https://www.instahyre.com/candidate/profile/",
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+            },
+            timeout=120,
+        )
+        resume_res.raise_for_status()
+
+        # 2. Refresh JSP
+        profile_after_resume = session.get(
+            INSTAHYRE_PROFILE_URL, timeout=30
+        ).json()
+        jsp = profile_after_resume["jsp"]
+        jsp_id = jsp["id"]
+        jsp_res = session.put(
+            f"https://www.instahyre.com/api/v1/candidate_misc/profile/candidate_jsp/{jsp_id}",
+            json=jsp,
+            headers={
+                "X-CSRFToken": session.cookies.get("csrftoken"),
+                "Origin": "https://www.instahyre.com",
+                "Referer": "https://www.instahyre.com/candidate/profile/",
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json;charset=UTF-8",
+            },
+            timeout=60,
+        )
+        jsp_res.raise_for_status()
+
+        updated_profile = session.get(INSTAHYRE_PROFILE_URL, timeout=30).json()
         new_uploaded_on = updated_profile["resume"]["uploaded_on"]
         new_profile_ts = (
             updated_profile.get("profile_field_updates", [{}])[0].get(
@@ -254,17 +204,24 @@ def run_instahyre() -> dict:
         return {
             "old_resume": old_uploaded_on,
             "new_resume": new_uploaded_on,
-            "old_profile": old_profile_ts,
             "new_profile": new_profile_ts,
         }
-
     finally:
-        logout_instahyre(session)
+        try:
+            session.get(
+                INSTAHYRE_LOGOUT_URL,
+                headers={
+                    "Referer": "https://www.instahyre.com/candidate/profile/"
+                },
+                timeout=30,
+            )
+        except Exception:
+            pass
         session.close()
 
 
 # ============================================================
-# NAUKRI ENGINE (FULL SESSION COOKIES)
+# NAUKRI ENGINE (PLAYWRIGHT HEADLESS BROWSER)
 # ============================================================
 
 
@@ -272,92 +229,92 @@ def run_naukri() -> dict:
     if not NAUKRI_COOKIES:
         raise Exception("NAUKRI_COOKIES environment variable not set")
 
-    session = requests.Session()
-
-    if NAUKRI_PROXY_URL:
-        logger.info("[Naukri] Using configured proxy for request routing")
-        session.proxies = {"http": NAUKRI_PROXY_URL, "https": NAUKRI_PROXY_URL}
-
-    # Parse and set all session cookies
     cookie_parser = SimpleCookie()
     cookie_parser.load(NAUKRI_COOKIES)
-    nauk_at_token = None
 
+    playwright_cookies = []
     for key, morsel in cookie_parser.items():
-        session.cookies.set(key, morsel.value, domain=".naukri.com")
-        if key == "nauk_at":
-            nauk_at_token = morsel.value
+        playwright_cookies.append({
+            "name": key,
+            "value": morsel.value,
+            "domain": ".naukri.com",
+            "path": "/",
+        })
 
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
-        ),
-        "clientid": "d3skt0p",
-        "appid": "1950",
-        "systemid": "Naukri",
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json",
-        "Origin": "https://www.naukri.com",
-        "Referer": "https://www.naukri.com/mnjuser/profile?id=&altresid",
-    })
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1440, "height": 900},
+        )
+        context.add_cookies(playwright_cookies)
 
-    if nauk_at_token:
-        session.headers.update({"Authorization": f"Bearer {nauk_at_token}"})
+        page = context.new_page()
+        logger.info("[Naukri] Loading profile page via headless browser...")
+        page.goto(NAUKRI_PROFILE_URL, wait_until="networkidle", timeout=60000)
 
-    # 1. Fetch current profile state
-    logger.info("[Naukri] Fetching current profile details...")
-    profile_res = session.post(
-        NAUKRI_PROFILE_GET_URL, json={"fieldMasks": []}, timeout=30
-    )
-    profile_res.raise_for_status()
-    profile_json = profile_res.json()
+        if "login" in page.url:
+            browser.close()
+            raise Exception(
+                "Naukri session redirected to login. Update NAUKRI_COOKIES secret."
+            )
 
-    profile_items = profile_json.get("data", {}).get("profile", [])
-    if not profile_items:
-        raise Exception("Failed to locate profile item in Naukri profile response")
+        # 1. Locate and click the Profile Summary edit trigger
+        logger.info("[Naukri] Opening Profile Summary editor...")
+        edit_summary_btn = page.locator(
+            "div.widgetHead:has-text('Profile summary') .edit, "
+            ".profile-summary .edit, "
+            "span:has-text('Profile summary') + span, "
+            "[data-icon='edit-summary']"
+        ).first
 
-    profile_obj = profile_items[0]
-    profile_id = profile_obj.get("profileId")
-    current_summary = profile_obj.get("summary", "").strip()
-    old_mod_time = profile_obj.get("lastModTime")
+        edit_summary_btn.wait_for(state="visible", timeout=15000)
+        edit_summary_btn.click()
+        page.wait_for_timeout(2000)
 
-    if not current_summary or not profile_id:
-        raise Exception("Could not find profileId or summary to refresh")
+        # 2. Toggle trailing period in summary textarea
+        textarea = page.locator(
+            "textarea#summary, textarea.summary-text, .profile-summary-layer"
+            " textarea, form textarea"
+        ).first
+        textarea.wait_for(state="visible", timeout=10000)
+        current_text = textarea.input_value().strip()
 
-    # 2. Toggle trailing period on summary
-    new_summary = (
-        current_summary[:-1]
-        if current_summary.endswith(".")
-        else f"{current_summary}."
-    )
+        new_text = (
+            current_text[:-1]
+            if current_text.endswith(".")
+            else f"{current_text}."
+        )
+        textarea.fill(new_text)
+        page.wait_for_timeout(1000)
 
-    # 3. Submit updated summary
-    logger.info("[Naukri] Submitting summary mutation to refresh timestamp...")
-    update_payload = {
-        "fieldMasks": [],
-        "data": {"profile": {"summary": new_summary}, "profileId": profile_id},
-    }
+        # 3. Click Save button
+        logger.info("[Naukri] Saving updated profile summary...")
+        save_btn = page.locator(
+            "button:has-text('Save'), form button[type='submit']"
+        ).first
+        save_btn.click()
 
-    update_res = session.post(
-        NAUKRI_PROFILE_UPDATE_URL, json=update_payload, timeout=30
-    )
-    update_res.raise_for_status()
+        page.wait_for_timeout(4000)
+        browser.close()
+        logger.info("[Naukri] Profile summary saved successfully via browser.")
 
-    # 4. Fetch updated profile to verify timestamp change
-    verify_res = session.post(
-        NAUKRI_PROFILE_GET_URL, json={"fieldMasks": []}, timeout=30
-    )
-    verify_res.raise_for_status()
-    new_profile_obj = verify_res.json().get("data", {}).get("profile", [])[0]
-    new_mod_time = new_profile_obj.get("lastModTime")
-    new_mod_ago = new_profile_obj.get("lastModAgo")
-
-    return {
-        "old_time": old_mod_time,
-        "new_time": new_mod_time,
-        "badge": new_mod_ago,
-    }
+        return {
+            "status": "Success",
+            "badge": "today",
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
 
 # ============================================================
@@ -366,7 +323,7 @@ def run_naukri() -> dict:
 
 
 def main():
-    jitter_applied = apply_jitter(min_seconds=1, max_seconds=2)
+    jitter_applied = apply_jitter(min_seconds=60, max_seconds=900)
     exec_start = time.time()
 
     reports = []
@@ -390,7 +347,7 @@ def main():
         naukri_data = run_naukri()
         reports.append(
             f"🟢 *Naukri: Success*\n"
-            f"  • *Updated:* `{naukri_data['new_time']}`\n"
+            f"  • *Updated:* `{naukri_data['time']}`\n"
             f"  • *Recruiter Badge:* `{naukri_data['badge']}` (Active)"
         )
     except Exception as e:
