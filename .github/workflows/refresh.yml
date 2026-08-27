@@ -31,4 +31,5 @@ jobs:
           NAUKRI_PASSWORD: ${{ secrets.NAUKRI_PASSWORD }}
           NAUKRI_AUTH_TOKEN: ${{ secrets.NAUKRI_AUTH_TOKEN }}
           NAUKRI_COOKIES: ${{ secrets.NAUKRI_COOKIES }}
+          NAUKRI_PROXY_URL: ${{ secrets.NAUKRI_PROXY_URL }}
         run: python main.py
