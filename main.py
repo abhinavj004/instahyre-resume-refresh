@@ -7,7 +7,6 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from helper import get_resume_payload
-from playwright.sync_api import sync_playwright
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -37,8 +36,11 @@ INSTAHYRE_LOGOUT_URL = "https://www.instahyre.com/logout/"
 
 NAUKRI_USERNAME = os.getenv("NAUKRI_USERNAME")
 NAUKRI_PASSWORD = os.getenv("NAUKRI_PASSWORD")
-NAUKRI_LOGIN_URL = "https://www.naukri.com/nlogin/login"
-NAUKRI_PROFILE_URL = "https://www.naukri.com/mnjuser/profile"
+NAUKRI_PROXY_URL = os.getenv("NAUKRI_PROXY_URL")
+
+NAUKRI_LOGIN_URL = "https://www.naukri.com/central-login-services/v1/login"
+NAUKRI_PROFILE_GET_URL = "https://www.naukri.com/cloudgateway-aurus/aurus-jobseeker-profile-wrapper/v0/jobseeker/users/self/get/fullprofiles"
+NAUKRI_PROFILE_UPDATE_URL = "https://www.naukri.com/cloudgateway-aurus/aurus-jobseeker-profile-wrapper/v0/jobseeker/users/self/update/fullprofiles"
 
 # ============================================================
 # CONFIG - TELEGRAM
@@ -150,7 +152,7 @@ def run_instahyre() -> dict:
         resume_id = profile["resume"]["id"]
         old_uploaded_on = profile["resume"]["uploaded_on"]
 
-        # 1. Refresh Resume File
+        # 1. Refresh Resume
         logger.info("[Instahyre] Refreshing resume...")
         payload = get_resume_payload(
             pdf_path=RESUME_FILE,
@@ -222,7 +224,7 @@ def run_instahyre() -> dict:
 
 
 # ============================================================
-# NAUKRI ENGINE (NATIVE STEALTH PLAYWRIGHT FLOW)
+# NAUKRI ENGINE (DIRECT API VIA RESIDENTIAL PROXY)
 # ============================================================
 
 
@@ -230,109 +232,126 @@ def run_naukri() -> dict:
     if not NAUKRI_USERNAME or not NAUKRI_PASSWORD:
         raise Exception("Missing NAUKRI_USERNAME or NAUKRI_PASSWORD.")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1440, "height": 900},
-            locale="en-US",
-            timezone_id="Asia/Kolkata",
-        )
+    session = requests.Session()
 
-        # Native anti-detection scripts
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-            window.chrome = { runtime: {} };
-        """)
+    if NAUKRI_PROXY_URL:
+        logger.info("[Naukri] Routing requests through residential proxy...")
+        session.proxies = {"http": NAUKRI_PROXY_URL, "https": NAUKRI_PROXY_URL}
 
-        page = context.new_page()
+    # 1. Authenticate & Obtain Fresh nauk_at Token
+    logger.info("[Naukri] Authenticating with Naukri Central Login...")
+    login_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "clientid": "d3skt0p",
+        "appid": "103",
+        "systemid": "jobseeker",
+        "Content-Type": "application/json",
+        "Origin": "https://www.naukri.com",
+        "Referer": "https://www.naukri.com/",
+    }
 
-        # 1. Login via web form
-        logger.info("[Naukri] Navigating to login page...")
-        page.goto(NAUKRI_LOGIN_URL, wait_until="networkidle", timeout=60000)
+    login_res = session.post(
+        NAUKRI_LOGIN_URL,
+        json={
+            "username": NAUKRI_USERNAME.strip(),
+            "password": NAUKRI_PASSWORD.strip(),
+        },
+        headers=login_headers,
+        timeout=30,
+    )
 
-        page.locator("input[placeholder*='Username'], input#usernameField").first.fill(
-            NAUKRI_USERNAME.strip()
-        )
-        page.locator("input[placeholder*='password'], input#passwordField").first.fill(
-            NAUKRI_PASSWORD.strip()
+    if login_res.status_code == 403:
+        raise Exception(
+            "Naukri blocked login with 403 MFA. Check if NAUKRI_PROXY_URL is set correctly."
         )
 
-        logger.info("[Naukri] Submitting login credentials...")
-        page.locator("button[type='submit']:has-text('Login'), .loginButton").first.click()
+    login_res.raise_for_status()
+    login_data = login_res.json()
 
-        try:
-            page.wait_for_url("**/mnjuser/**", timeout=30000)
-            logger.info("[Naukri] Login successful")
-        except Exception:
-            if page.locator("text='Enter OTP'").is_visible() or page.locator("text='Verification'").is_visible():
-                browser.close()
-                raise Exception("Naukri triggered MFA/OTP challenge on login.")
-            browser.close()
-            raise Exception("Login failed or redirection timed out.")
-
-        # 2. Go to Profile Page
-        logger.info("[Naukri] Navigating to profile view...")
-        page.goto(NAUKRI_PROFILE_URL, wait_until="networkidle", timeout=45000)
-        page.wait_for_timeout(2000)
-
-        # 3. Trigger Profile Summary Editor
-        logger.info("[Naukri] Opening Profile Summary editor...")
-        edit_btn = page.locator(
-            "div.widgetHead:has-text('Profile summary') .edit, "
-            ".profile-summary .edit, "
-            "span:has-text('Profile summary') ~ .edit, "
-            "[data-icon='edit-summary']"
-        ).first
-        edit_btn.wait_for(state="visible", timeout=15000)
-        edit_btn.click()
-        page.wait_for_timeout(1500)
-
-        # 4. Toggle trailing period in summary
-        textarea = page.locator(
-            "textarea#summary, textarea.summary-text, .profile-summary-layer textarea, form textarea"
-        ).first
-        textarea.wait_for(state="visible", timeout=10000)
-        current_text = textarea.input_value().strip()
-
-        new_text = (
-            current_text[:-1]
-            if current_text.endswith(".")
-            else f"{current_text}."
+    # Hydrate cookies and extract new nauk_at
+    cookies = login_data.get("cookies", [])
+    jwt_token = None
+    for c in cookies:
+        session.cookies.set(
+            c["name"], c["value"], domain=c.get("domain", ".naukri.com")
         )
-        textarea.fill(new_text)
-        page.wait_for_timeout(1000)
+        if c["name"] == "nauk_at":
+            jwt_token = c["value"]
 
-        # 5. Save Changes
-        logger.info("[Naukri] Submitting updated profile summary...")
-        save_btn = page.locator(
-            "button:has-text('Save'), form button[type='submit']"
-        ).first
-        save_btn.click()
-        page.wait_for_timeout(4000)
+    if not jwt_token:
+        raise Exception("Failed to extract valid nauk_at token from login response.")
 
-        browser.close()
-        logger.info("[Naukri] Profile update completed successfully")
+    logger.info("[Naukri] Authenticated successfully. Fetching profile...")
 
-        return {
-            "status": "Success",
-            "badge": "today",
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
+    # 2. Configure Gateway Headers
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "clientid": "d3skt0p",
+        "appid": "1950",
+        "systemid": "Naukri",
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Origin": "https://www.naukri.com",
+        "Referer": "https://www.naukri.com/mnjuser/profile",
+        "Authorization": f"Bearer {jwt_token}",
+    })
+
+    # 3. Retrieve Profile
+    profile_res = session.post(
+        NAUKRI_PROFILE_GET_URL, json={"fieldMasks": []}, timeout=30
+    )
+    profile_res.raise_for_status()
+    profile_items = profile_res.json().get("data", {}).get("profile", [])
+    if not profile_items:
+        raise Exception("No profile record found in Naukri profile response.")
+
+    profile_obj = profile_items[0]
+    profile_id = profile_obj.get("profileId")
+    current_summary = profile_obj.get("summary", "").strip()
+
+    if not profile_id or not current_summary:
+        raise Exception("Missing profileId or summary field in profile data.")
+
+    # 4. Toggle Trailing Period
+    new_summary = (
+        current_summary[:-1]
+        if current_summary.endswith(".")
+        else f"{current_summary}."
+    )
+
+    # 5. Mutate Summary
+    logger.info("[Naukri] Mutating summary to trigger active status...")
+    update_res = session.post(
+        NAUKRI_PROFILE_UPDATE_URL,
+        json={
+            "fieldMasks": [],
+            "data": {
+                "profile": {"summary": new_summary},
+                "profileId": profile_id,
+            },
+        },
+        timeout=30,
+    )
+    update_res.raise_for_status()
+
+    # 6. Verify Timestamp
+    verify_res = session.post(
+        NAUKRI_PROFILE_GET_URL, json={"fieldMasks": []}, timeout=30
+    )
+    verify_res.raise_for_status()
+    updated_obj = verify_res.json().get("data", {}).get("profile", [])[0]
+
+    return {
+        "status": "Success",
+        "new_time": updated_obj.get("lastModTime"),
+        "badge": updated_obj.get("lastModAgo"),
+    }
 
 
 # ============================================================
@@ -341,7 +360,7 @@ def run_naukri() -> dict:
 
 
 def main():
-    jitter_applied = apply_jitter(min_seconds=1, max_seconds=2)
+    jitter_applied = apply_jitter(min_seconds=2, max_seconds=2)
     exec_start = time.time()
 
     reports = []
@@ -365,7 +384,7 @@ def main():
         naukri_data = run_naukri()
         reports.append(
             f"🟢 *Naukri: Success*\n"
-            f"  • *Updated:* `{naukri_data['time']}`\n"
+            f"  • *Updated:* `{naukri_data['new_time']}`\n"
             f"  • *Recruiter Badge:* `{naukri_data['badge']}` (Active)"
         )
     except Exception as e:
