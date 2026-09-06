@@ -19,7 +19,6 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
-          playwright install chromium --with-deps
 
       - name: Run Resume Refresh
         env:
